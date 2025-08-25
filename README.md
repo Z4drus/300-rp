@@ -21,7 +21,14 @@
   - [3.7 Processus et ressources](#37-processus-et-ressources)
   - [3.8 Disques et espace](#38-disques-et-espace)
   - [3.9 Journaux système](#39-journaux-système)
-- [4. Références](#4-références)
+- [4. Mise en place de SSH (NAT VMware + IP fixe)](#4-mise-en-place-de-ssh-nat-vmware--ip-fixe)
+  - [4.1 Contexte réseau (NAT 192.168.254.0/24)](#41-contexte-réseau-nat-192168254024)
+  - [4.2 Configurer Netplan (IP statique)](#42-configurer-netplan-ip-statique)
+  - [4.3 Appliquer la configuration](#43-appliquer-la-configuration)
+  - [4.4 Installer et activer SSH](#44-installer-et-activer-ssh)
+  - [4.5 Connexion depuis Windows](#45-connexion-depuis-windows)
+  - [4.6 Transfert de fichiers avec SCP](#46-transfert-de-fichiers-avec-scp)
+- [5. Références](#5-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -121,7 +128,82 @@ journalctl -xe | less          # journaux système (systemd)
 sudo tail -f /var/log/syslog   # suivre en direct syslog
 ```
 
-## 4. Références
+## 4. Mise en place de SSH (NAT VMware + IP fixe)
+
+### 4.1 Contexte réseau (NAT 192.168.254.0/24)
+Votre VM est sur un réseau virtuel en NAT (VMware) avec la plage `192.168.254.0/24`. On configure une IP statique dans ce sous-réseau (ex.: `192.168.254.10`) pour joindre la VM depuis l'hôte.
+
+### 4.2 Configurer Netplan (IP statique)
+Éditer la configuration Netplan (adaptez l'interface si nécessaire, ex.: `ens33`).
+
+```bash
+sudo nano /etc/netplan/50-cloud-init.yaml
+```
+
+Mettre le contenu suivant (adaptez l'utilisateur si nécessaire) :
+
+```yaml
+network:
+  version: 2
+  ethernets:
+    ens33:
+      dhcp4: no
+      addresses:
+        - 192.168.254.10/24
+      gateway4: 192.168.254.2
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 1.1.1.1
+```
+
+### 4.3 Appliquer la configuration
+```bash
+sudo netplan apply
+```
+
+Vérifications rapides :
+
+```bash
+ip a
+ping 192.168.254.2 -c 4
+ping 8.8.8.8 -c 4
+ping google.com -c 4
+```
+
+### 4.4 Installer et activer SSH
+```bash
+sudo apt update
+sudo apt install openssh-server -y
+sudo systemctl start ssh
+sudo systemctl enable ssh
+sudo systemctl status ssh
+```
+
+### 4.5 Connexion depuis Windows
+Dans PowerShell, cmd, Git Bash ou Windows Terminal :
+
+```bash
+ssh noe@192.168.254.10
+```
+
+Remplacez `noe` par votre utilisateur Linux.
+
+### 4.6 Transfert de fichiers avec SCP
+Sur la machine hôte (Windows), créer un fichier `test.txt` puis envoyer vers la VM :
+
+```bash
+scp test.txt noe@192.168.254.10:/home/noe/
+```
+
+Côté VM, vérifier :
+
+```bash
+ls -l /home/noe/
+cat /home/noe/test.txt
+```
+
+## 5. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
