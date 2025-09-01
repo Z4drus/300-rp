@@ -16,6 +16,13 @@
   - [3.2 Gestion des fichiers et dossiers](#32-gestion-des-fichiers-et-dossiers)
   - [3.3 Lecture et édition de fichiers](#33-lecture-et-édition-de-fichiers)
   - [3.4 Permissions et propriétaires](#34-permissions-et-propriétaires)
+    - [3.4.1 Utilisateurs et groupes](#341-utilisateurs-et-groupes)
+    - [3.4.2 Gérer les utilisateurs](#342-gérer-les-utilisateurs)
+    - [3.4.3 Gérer les groupes](#343-gérer-les-groupes)
+    - [3.4.4 Modèle de permissions (rwx, U/G/O)](#344-modèle-de-permissions-rwx-ugo)
+    - [3.4.5 chmod: symbolique, octal et binaire](#345-chmod-symbolique-octal-et-binaire)
+    - [3.4.6 Bits spéciaux: SUID, SGID, Sticky](#346-bits-spéciaux-suid-sgid-sticky)
+    - [3.4.7 Propriété: chown et chgrp](#347-propriété-chown-et-chgrp)
   - [3.5 Gestion des paquets (APT)](#35-gestion-des-paquets-apt)
   - [3.6 Réseau de base](#36-réseau-de-base)
   - [3.7 Processus et ressources](#37-processus-et-ressources)
@@ -90,6 +97,130 @@ ls -l                    # voir les permissions
 chmod u+x script.sh      # ajouter l'exécution pour l'utilisateur
 chmod 644 fichier.txt    # rw-r--r--
 sudo chown user:group fichier.txt  # changer propriétaire:groupe
+```
+
+#### 3.4.1 Utilisateurs et groupes
+
+```bash
+id                       # identités de l'utilisateur courant
+# uid=1000(noe) gid=1000(noe) groups=1000(noe),27(sudo),...
+
+id alice                 # info d'un autre utilisateur
+getent passwd alice      # ligne /etc/passwd pour alice
+getent group dev         # info d'un groupe
+
+groups alice             # groupes (noms) de l'utilisateur
+```
+
+Un utilisateur appartient à un groupe principal et peut être membre de groupes secondaires. Les permissions Unix se basent sur trois classes: utilisateur (U), groupe (G) et autres (O).
+
+#### 3.4.2 Gérer les utilisateurs
+
+```bash
+sudo useradd -m -s /bin/bash alice   # créer alice (home + shell)
+sudo passwd alice                    # définir le mot de passe
+
+sudo usermod -aG sudo alice          # ajouter alice au groupe sudo
+sudo usermod -s /usr/bin/zsh alice   # changer de shell
+sudo usermod -L alice                # verrouiller le compte
+sudo usermod -U alice                # déverrouiller
+
+sudo deluser alice                   # supprimer l'utilisateur (garde /home)
+sudo deluser --remove-home alice     # supprime aussi son /home
+```
+
+#### 3.4.3 Gérer les groupes
+
+```bash
+sudo groupadd dev                    # créer un groupe
+sudo usermod -aG dev alice           # ajouter alice au groupe dev
+sudo gpasswd -d alice dev            # retirer alice du groupe dev
+sudo groupdel dev                    # supprimer le groupe (s'il est vide)
+```
+
+Astuce projet collaboratif: créer un groupe, l'assigner à un dossier commun et gérer les permissions de groupe (voir SGID plus bas).
+
+#### 3.4.4 Modèle de permissions (rwx, U/G/O)
+
+Chaque entrée `ls -l` montre: type + 9 bits `rwxrwxrwx` (U/G/O).
+
+```bash
+ls -l fichier.txt
+# -rw-r----- 1 noe dev 1K date fichier.txt
+# U: rw- (lecture/écriture) | G: r-- (lecture) | O: ---
+```
+
+Correspondance binaire et octale par triplet (r=4, w=2, x=1):
+- rwx = 111b = 7
+- rw- = 110b = 6
+- r-x = 101b = 5
+- r-- = 100b = 4
+
+#### 3.4.5 chmod: symbolique, octal et binaire
+
+- Symbolique: `u/g/o` + `+`/`-`/`=` + `rwx`.
+- Octal: trois chiffres U/G/O, somme des bits (4+2+1).
+- Binaire: non supporté directement par `chmod`, mais équivaut aux octaux via conversion 3 bits → 1 chiffre.
+
+```bash
+# Symbolique
+chmod g+w fichier.txt             # ajoute l'écriture au groupe
+chmod o-r fichier.txt             # retire la lecture aux autres
+
+# Octal
+chmod 640 fichier.txt             # U:rw- (6) G:r-- (4) O:--- (0)
+ls -l fichier.txt | cut -d' ' -f1
+# -rw-r-----
+
+# «En binaire» (conceptuel): 110 100 000 → 6 4 0
+chmod 640 fichier.txt             # même résultat
+
+# Dossier + inheritance pratique
+chmod -R 2755 /srv/projets        # voir SGID ci-dessous
+```
+
+#### 3.4.6 Bits spéciaux: SUID, SGID, Sticky
+
+- SUID (4xxx): exécuter avec l'UID du propriétaire (bit sur `u`).
+- SGID (2xxx): exécuter avec le GID du propriétaire (fichier) et, sur un dossier, force le groupe des nouveaux fichiers/dossiers créés dedans et propage le bit.
+- Sticky (1xxx): sur un dossier, seuls propriétaire du fichier ou root peuvent supprimer/renommer (ex.: `/tmp`).
+
+```bash
+# SUID sur un binaire
+sudo chmod u+s /usr/local/bin/outil     # équivaut à 4xxx
+sudo chmod 4755 /usr/local/bin/outil
+ls -l /usr/local/bin/outil
+# -rwsr-xr-x ...  (s sur le triplet utilisateur)
+
+# SGID sur un dossier de projet partagé
+sudo groupadd dev
+sudo install -d -m 2775 -o root -g dev /srv/projets
+ls -ld /srv/projets
+# drwxrwsr-x root dev ...  (s sur le triplet groupe)
+
+# Sticky bit sur un dossier partagé (ex.: style /tmp)
+sudo chmod 1777 /srv/public
+ls -ld /srv/public
+# drwxrwxrwt ...  (t en position autres)
+```
+
+Bonnes pratiques:
+- Pour des dépôts d'équipe: `root:dev` + permissions `2775` sur le dossier racine pour que tous les nouveaux fichiers héritent du groupe `dev`.
+- Éviter SUID non nécessaire (risques de sécurité).
+
+#### 3.4.7 Propriété: chown et chgrp
+
+```bash
+# Changer propriétaire et groupe
+sudo chown alice:dev fichier.txt
+sudo chgrp dev dossier
+
+# Appliquer récursivement
+sudo chown -R root:dev /srv/projets
+
+# Vérifier rapidement
+stat -c "%U:%G %A %n" fichier.txt
+# alice:dev -rw-r----- fichier.txt
 ```
 
 ### 3.5 Gestion des paquets (APT)
