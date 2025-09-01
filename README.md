@@ -35,7 +35,15 @@
   - [4.4 Installer et activer SSH](#44-installer-et-activer-ssh)
   - [4.5 Connexion depuis Windows](#45-connexion-depuis-windows)
   - [4.6 Transfert de fichiers avec SCP](#46-transfert-de-fichiers-avec-scp)
-- [5. Références](#5-références)
+- [5. Gestion des applications, mises à jour et services](#5-gestion-des-applications-mises-à-jour-et-services)
+  - [5.1 Gestionnaire bas niveau: dpkg](#51-gestionnaire-bas-niveau-dpkg)
+  - [5.2 Gestionnaire haut niveau: APT](#52-gestionnaire-haut-niveau-apt)
+  - [5.3 Paquets universels: Snap](#53-paquets-universels-snap)
+  - [5.4 Mises à jour (manuelles et automatisées)](#54-mises-à-jour-manuelles-et-automatisées)
+  - [5.5 Mises à jour de sécurité: unattended-upgrades](#55-mises-à-jour-de-sécurité-unattended-upgrades)
+  - [5.6 Services avec systemd](#56-services-avec-systemd)
+  - [5.7 Planification de tâches avec cron](#57-planification-de-tâches-avec-cron)
+- [6. Références](#6-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -334,7 +342,148 @@ ls -l /home/noe/
 cat /home/noe/test.txt
 ```
 
-## 5. Références
+## 5. Gestion des applications, mises à jour et services
+
+### 5.1 Gestionnaire bas niveau: dpkg
+But: gérer directement les paquets `.deb` (installation/suppression). Ne gère pas les dépendances.
+
+```bash
+# Installer un paquet local
+sudo dpkg -i paquet.deb
+
+# Supprimer un paquet (garde la configuration)
+sudo dpkg -r nom_du_paquet
+
+# Supprimer y compris les fichiers de configuration
+sudo dpkg -P nom_du_paquet
+
+# Lister les paquets installés
+dpkg -l | less
+```
+
+### 5.2 Gestionnaire haut niveau: APT
+But: installer/mettre à jour depuis des dépôts en résolvant les dépendances. Recommandé au quotidien.
+
+```bash
+# Mettre à jour l'index des paquets
+sudo apt update
+
+# Mettre à jour les paquets installés
+sudo apt upgrade -y
+
+# Installer / supprimer un paquet
+sudo apt install nom_du_paquet -y
+sudo apt remove nom_du_paquet -y
+
+# Installer une version spécifique
+sudo apt install nom_du_paquet=1.2.3-1
+```
+
+Note: `apt-get` est l'ancêtre de `apt`. Il reste supporté et courant dans la documentation.
+
+### 5.3 Paquets universels: Snap
+Paquets autonomes avec dépendances intégrées, exécutés en sandbox. Maintenus par Canonical, multiplateformes Linux.
+
+```bash
+# Rechercher une application
+snap find nom_application
+
+# Installer, mettre à jour
+sudo snap install nom_application
+sudo snap refresh                # toutes les apps Snap
+sudo snap refresh nom_application
+```
+
+### 5.4 Mises à jour (manuelles et automatisées)
+
+```bash
+# Tout mettre à jour côté APT
+sudo apt update && sudo apt upgrade -y
+
+# Mettre à jour une app vers une version souhaitée
+sudo apt update && sudo apt install nom_du_paquet=1.2.3-1 -y
+
+# Mettre à jour toutes les apps Snap
+sudo snap refresh
+```
+
+### 5.5 Mises à jour de sécurité: unattended-upgrades
+Objectif: appliquer automatiquement les correctifs de sécurité sans intervention manuelle (recommandé sur serveurs).
+
+Fichiers clés:
+- `/etc/apt/apt.conf.d/50unattended-upgrades` (sélection des origines/typiques: security)
+- `/etc/apt/apt.conf.d/20auto-upgrades` (fréquence/activation)
+
+```bash
+# Installer le package si besoin
+sudo apt install unattended-upgrades -y
+
+# Configurer (éditeur)
+sudo nano /etc/apt/apt.conf.d/50unattended-upgrades
+sudo nano /etc/apt/apt.conf.d/20auto-upgrades
+
+# Activer/forcer la reconfig (assistant)
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
+
+Prudence: tester d'abord sur environnements non critiques pour éviter des effets de bord.
+
+### 5.6 Services avec systemd
+systemd gère le démarrage, l'arrêt et l'activation au boot des services.
+
+```bash
+# État d'un service
+systemctl status ssh.service | cat
+
+# Démarrer / arrêter / redémarrer
+sudo systemctl start apache2.service
+sudo systemctl stop apache2.service
+sudo systemctl restart apache2.service
+
+# Activer / désactiver au démarrage
+sudo systemctl enable apache2.service
+sudo systemctl disable apache2.service
+
+# Lister les unités de type service
+systemctl list-unit-files --type=service | cat
+```
+
+Astuce: le suffixe `.service` est souvent optionnel (`systemctl status ssh`).
+
+### 5.7 Planification de tâches avec cron
+Deux emplacements principaux:
+- Tâches utilisateur: `/var/spool/cron/crontabs/`
+- Tâches système: `/etc/crontab` (+ fichiers dans `/etc/cron.d/`)
+
+Édition et affichage:
+
+```bash
+crontab -e    # éditer les tâches de l'utilisateur courant
+crontab -l    # lister
+```
+
+Syntaxe: `mm hh d m dow [user] command`
+- mm: minute (0-59)
+- hh: heure (0-23)
+- d: jour du mois (1-31)
+- m: mois (1-12)
+- dow: jour de semaine (0-7, 0/7=dimanche)
+
+Caractères spéciaux: `*` (toutes valeurs), `,` (liste), `-` (plage), `/` (pas).
+
+Exemples (préférer un serveur de test):
+
+```bash
+# Tous les jours à 20:00: mises à jour APT
+0 20 * * * /usr/bin/apt update && /usr/bin/apt upgrade -y
+
+# Chaque dimanche à 03:30: mise à jour d'un Snap
+30 3 * * 0 /usr/bin/snap refresh
+```
+
+Ressource utile: [cron.help](https://cron.help)
+
+## 6. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
