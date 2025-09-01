@@ -43,7 +43,15 @@
   - [5.5 Mises à jour de sécurité: unattended-upgrades](#55-mises-à-jour-de-sécurité-unattended-upgrades)
   - [5.6 Services avec systemd](#56-services-avec-systemd)
   - [5.7 Planification de tâches avec cron](#57-planification-de-tâches-avec-cron)
-- [6. Références](#6-références)
+- [6. Disques, partitions et montage](#6-disques-partitions-et-montage)
+  - [6.1 Découvrir les disques et partitions](#61-découvrir-les-disques-et-partitions)
+  - [6.2 Partitionner un disque](#62-partitionner-un-disque)
+  - [6.3 Formater (systèmes de fichiers)](#63-formater-systèmes-de-fichiers)
+  - [6.4 Monter et vérifier](#64-monter-et-vérifier)
+  - [6.5 Montage automatique avec fstab](#65-montage-automatique-avec-fstab)
+  - [6.6 Redimensionner une partition et un FS](#66-redimensionner-une-partition-et-un-fs)
+  - [6.7 Partage avec Windows (FAT32/NTFS)](#67-partage-avec-windows-fat32ntfs)
+- [7. Références](#7-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -471,6 +479,37 @@ Syntaxe: `mm hh d m dow [user] command`
 
 Caractères spéciaux: `*` (toutes valeurs), `,` (liste), `-` (plage), `/` (pas).
 
+Schéma visuel des champs:
+
+```text
+# mm  hh  d   m   dow  [user]       command
+#  |   |  |   |    |      |--> uniquement dans /etc/crontab et /etc/cron.d/
+#  |   |  |   |    +--------- jour de semaine (0-7, 0/7=dimanche)
+#  |   |  |   +-------------- mois (1-12)
+#  |   |  +------------------ jour du mois (1-31)
+#  |   +--------------------- heure (0-23)
+#  +------------------------- minute (0-59)
+```
+
+Emplacements utiles:
+- `/etc/crontab` et `/etc/cron.d/` requièrent la colonne `[user]`.
+- `crontab -e` (utilisateur) n'inclut pas `[user]`.
+- Répertoires: `/etc/cron.hourly`, `/etc/cron.daily`, `/etc/cron.weekly`, `/etc/cron.monthly` exécutent les scripts déposés dedans.
+
+Raccourcis pratiques:
+
+```bash
+@reboot /usr/local/bin/script-au-demarrage.sh
+@hourly /usr/local/bin/tache_heure.sh
+@daily  /usr/local/bin/backup.sh
+@weekly /usr/local/bin/rotation.sh
+@monthly /usr/local/bin/bilan.sh
+```
+
+Conseils:
+- Utiliser des chemins absolus (`/usr/bin/apt`, `/usr/bin/snap`) car l'environnement PATH de cron est limité.
+- Rediriger la sortie vers des logs si besoin: `>> /var/log/cron.log 2>&1`.
+
 Exemples (préférer un serveur de test):
 
 ```bash
@@ -479,11 +518,162 @@ Exemples (préférer un serveur de test):
 
 # Chaque dimanche à 03:30: mise à jour d'un Snap
 30 3 * * 0 /usr/bin/snap refresh
+
+# Toutes les 5 minutes
+*/5 * * * * /usr/local/bin/collect-metrics.sh >> /var/log/metrics.log 2>&1
+
+# Jours ouvrés à 09:00-17:00, toutes les 2 heures
+0 9-17/2 * * 1-5 /usr/local/bin/envoi-rapport.sh
+
+# Le 1er du mois à 01:15 (avec champ user dans /etc/crontab)
+15 1 1 * * root /usr/local/bin/archiver.sh
+
+# Listes et plages: à 00 et 30 min, entre 8h et 18h, du lundi au vendredi
+0,30 8-18 * * 1-5 /usr/local/bin/sauvegarde-incr.sh
 ```
 
 Ressource utile: [cron.help](https://cron.help)
 
-## 6. Références
+## 6. Disques, partitions et montage
+
+### 6.1 Découvrir les disques et partitions
+Objectif: identifier les périphériques de blocs et voir leur structure.
+
+```bash
+lsblk -f                     # arborescence, types de FS et labels/UUID
+sudo fdisk -l | less         # table de partitions détaillée (MBR/GPT)
+blkid                        # lister UUID/LABEL par périphérique
+sudo parted -l | cat         # vue GPT lisible (si parted installé)
+```
+
+Repères:
+- Disques: `/dev/sda`, `/dev/sdb`, ...
+- Partitions: `/dev/sdb1`, `/dev/sdb2`, ...
+- Périphériques logiques LVM: `/dev/mapper/<vg>-<lv>` (non couvert en détail ici).
+
+### 6.2 Partitionner un disque
+Créer/modifier des partitions. Sur disque vide, choisir GPT de préférence.
+
+```bash
+# Avec fdisk (MBR/GPT basique)
+sudo fdisk /dev/sdb
+# n (nouvelle partition), p (primaire), w (écrire), q (quitter sans sauver)
+
+# Relecture de table (si pas de reboot)
+sudo partprobe /dev/sdb   # ou sudo kpartx -a /dev/sdb
+```
+
+Astuce: noter le secteur de début avant modification lors d'un redimensionnement manuel.
+
+### 6.3 Formater (systèmes de fichiers)
+Créer un système de fichiers sur une partition.
+
+```bash
+# ext4 (générique Linux)
+sudo mkfs.ext4 -L DEV_DATA /dev/sdb1
+
+# FAT32 (échange multi-OS)
+sudo mkfs.vfat -F 32 -n WIN_SHARE /dev/sdc1
+
+# NTFS (si besoin d'écrire depuis Linux)
+sudo mkfs.ntfs -F -L WIN_NTFS /dev/sdd1
+```
+
+Vérification:
+```bash
+lsblk -f       # voir TYPE, LABEL, UUID
+blkid /dev/sdb1
+```
+
+### 6.4 Monter et vérifier
+Monter temporairement dans un répertoire dédié.
+
+```bash
+sudo mkdir -p /data/dev-data
+sudo mount /dev/sdb1 /data/dev-data
+
+# Vérifier
+df -h | grep dev-data
+mount | grep dev-data
+
+# Droits de base
+sudo chown -R root:dev /data/dev-data
+sudo chmod 2775 /data/dev-data   # SGID pour héritage de groupe
+```
+
+### 6.5 Montage automatique avec fstab
+Monter au démarrage via `/etc/fstab` en utilisant l'UUID pour fiabilité.
+
+```bash
+sudo blkid /dev/sdb1   # récupérer l'UUID
+sudo nano /etc/fstab
+```
+
+Entrée type ext4:
+
+```text
+UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  /data/dev-data  ext4  defaults  0  2
+```
+
+Entrée type vfat (FAT32):
+
+```text
+UUID=YYYY-YYYY  /mnt/win-share  vfat  uid=1000,gid=1000,umask=002,utf8  0  0
+```
+
+Validation:
+```bash
+sudo mount -a      # tester la syntaxe fstab
+df -h | grep -E '/data/dev-data|/mnt/win-share'
+```
+
+### 6.6 Redimensionner une partition et un FS
+Étendre la partition puis le système de fichiers (sans reformatage).
+
+```bash
+# 1) Vérifier la nouvelle taille du disque (ex.: disque étendu dans l'hyperviseur)
+lsblk
+
+# 2) Ajuster la partition (conserver le même début, étendre la fin)
+sudo fdisk /dev/sdb
+# supprimer la partition puis la recréer à l'identique avec fin étendue, puis w
+
+# 3) Relecture de la table
+sudo partprobe /dev/sdb   # ou reboot
+
+# 4) Étendre le FS (ext4)
+sudo resize2fs /dev/sdb1
+
+# 5) Contrôles
+df -h | grep dev-data
+```
+
+Remarques:
+- Pour XFS, utiliser `xfs_growfs` (monté) au lieu de `resize2fs`.
+- Toujours effectuer des sauvegardes avant des opérations de partitionnement.
+
+### 6.7 Partage avec Windows (FAT32/NTFS)
+Cas d'usage: partition d'échange lisible par Windows.
+
+```bash
+sudo mkdir -p /mnt/win-share
+sudo mkfs.vfat -F 32 -n WIN_SHARE /dev/sdc1
+
+# fstab (FAT32)
+UUID=YYYY-YYYY  /mnt/win-share  vfat  uid=1000,gid=1000,umask=002,utf8  0  0
+
+# Monter maintenant
+sudo mount -a
+```
+
+Pour NTFS, installer le pilote:
+
+```bash
+sudo apt install ntfs-3g -y
+sudo mkfs.ntfs -F -L WIN_NTFS /dev/sdc1
+```
+
+## 7. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
