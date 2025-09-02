@@ -51,7 +51,16 @@
   - [6.5 Montage automatique avec fstab](#65-montage-automatique-avec-fstab)
   - [6.6 Redimensionner une partition et un FS](#66-redimensionner-une-partition-et-un-fs)
   - [6.7 Partage avec Windows (FAT32/NTFS)](#67-partage-avec-windows-fat32ntfs)
-- [7. Références](#7-références)
+- [7. Partage de fichiers: NFS et Samba](#7-partage-de-fichiers-nfs-et-samba)
+  - [7.1 Contexte et objectifs](#71-contexte-et-objectifs)
+  - [7.2 NFS côté serveur (Ubuntu Server)](#72-nfs-côté-serveur-ubuntu-server)
+  - [7.3 NFS côté client (Ubuntu Desktop)](#73-nfs-côté-client-ubuntu-desktop)
+  - [7.4 Samba côté serveur (Ubuntu Server)](#74-samba-côté-serveur-ubuntu-server)
+  - [7.5 Client Windows 11 vers Samba](#75-client-windows-11-vers-samba)
+  - [7.6 Client Linux vers Samba (optionnel)](#76-client-linux-vers-samba-optionnel)
+  - [7.7 Dépannage et cas courants](#77-dépannage-et-cas-courants)
+  - [7.8 Bonnes pratiques et différences](#78-bonnes-pratiques-et-différences)
+- [8. Références](#8-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -673,7 +682,120 @@ sudo apt install ntfs-3g -y
 sudo mkfs.ntfs -F -L WIN_NTFS /dev/sdc1
 ```
 
-## 7. Références
+## 7. Partage de fichiers: NFS et Samba
+
+### 7.1 Contexte et objectifs
+Dans une PME mixte Windows/Ubuntu, on souhaite centraliser un partage de fichiers sur Ubuntu Server.
+\- Accès Linux via NFS (intégration POSIX, performant en LAN).
+\- Accès Windows via Samba/SMB (protocole natif Windows).
+
+### 7.2 NFS côté serveur (Ubuntu Server)
+```bash
+# Installer NFS serveur
+sudo apt update && sudo apt install -y nfs-kernel-server
+
+# Dossier exporté
+sudo mkdir -p /srv/partage_nfs
+sudo chown root:root /srv/partage_nfs
+# Permissif pour labo (évite problèmes d'UID/GID). À durcir en prod.
+sudo chmod 0777 /srv/partage_nfs
+
+# Autoriser un client précis (ex.: 10.10.2.43)
+echo "/srv/partage_nfs 10.10.2.43(rw,sync,no_subtree_check)" | sudo tee -a /etc/exports
+
+# (ré)exporter et activer le service
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+
+# (si UFW actif) autoriser le client
+sudo ufw allow from 10.10.2.43 to any port nfs || true
+```
+
+### 7.3 NFS côté client (Ubuntu Desktop)
+```bash
+sudo apt update && sudo apt install -y nfs-common
+sudo mkdir -p /mnt/nfs_share
+
+# Monter le partage (NFSv4)
+sudo mount -t nfs4 <SERVER_IP>:/srv/partage_nfs /mnt/nfs_share
+
+# Test
+echo "hello-nfs" | sudo tee /mnt/nfs_share/test.txt
+ls -l /mnt/nfs_share
+
+# (option) montage automatique
+echo "<SERVER_IP>:/srv/partage_nfs /mnt/nfs_share nfs4 defaults,_netdev 0 0" | sudo tee -a /etc/fstab
+```
+
+Conseil: si `exportfs -ra` remonte une duplication, nettoyer `/etc/exports` et `/etc/exports.d/*.exports` pour ne garder qu'une seule ligne par export.
+
+```bash
+# Nettoyage duplication d'exports (exemple)
+sudo cp /etc/exports /etc/exports.bak.$(date +%F_%H%M)
+sudo sed -i '\|^/srv/partage_nfs|d' /etc/exports
+sudo find /etc/exports.d -maxdepth 1 -type f -exec sudo sed -i '\|^/srv/partage_nfs|d' {} +
+echo "/srv/partage_nfs 10.10.2.43(rw,sync,no_subtree_check)" | sudo tee -a /etc/exports
+sudo exportfs -ua && sudo exportfs -ra && sudo exportfs -v
+```
+
+### 7.4 Samba côté serveur (Ubuntu Server)
+```bash
+# Installer Samba
+sudo apt update && sudo apt install -y samba
+
+# Créer un utilisateur système (sans mot de passe shell) et Samba
+sudo adduser --disabled-password smbuser
+echo -e "<SMB_PASS>\n<SMB_PASS>" | sudo smbpasswd -a smbuser
+
+# Dossier partagé
+sudo mkdir -p /srv/partage_samba
+sudo chown smbuser:smbuser /srv/partage_samba
+sudo chmod 2770 /srv/partage_samba
+
+# Sauvegarder et compléter la configuration
+sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
+sudo bash -c 'cat >>/etc/samba/smb.conf << "EOF"\n\n[partage-samba]\n   path = /srv/partage_samba\n   browseable = yes\n   read only = no\n   valid users = smbuser\n   create mask = 0660\n   directory mask = 0770\nEOF'
+
+# Redémarrer et activer
+sudo systemctl enable --now smbd
+sudo systemctl restart smbd
+
+# (si UFW actif)
+sudo ufw allow "Samba" || true
+```
+
+### 7.5 Client Windows 11 vers Samba
+\- Explorateur: saisir `\\<SERVER_IP>\partage-samba` puis s'authentifier `smbuser` / `<SMB_PASS>`.
+
+Montage en lecteur `Z:` (PowerShell, persistant):
+```powershell
+net use Z: \\<SERVER_IP>\partage-samba /user:smbuser <SMB_PASS> /persistent:yes
+```
+
+### 7.6 Client Linux vers Samba (optionnel)
+```bash
+sudo apt install -y cifs-utils
+sudo mkdir -p /mnt/smb
+sudo mount -t cifs //<SERVER_IP>/partage-samba /mnt/smb -o username=smbuser,vers=3.0,uid=$(id -u),gid=$(id -g)
+
+# (option) fstab
+echo "//<SERVER_IP>/partage-samba /mnt/smb cifs username=smbuser,vers=3.0,uid=1000,gid=1000,_netdev 0 0" | sudo tee -a /etc/fstab
+```
+
+### 7.7 Dépannage et cas courants
+- Permissions NFS insuffisantes: côté serveur, pour un labo, `sudo chmod 777 /srv/partage_nfs` puis `sudo exportfs -ra`. Pour un contrôle fin: options d'export (`rw`, `root_squash`/`no_root_squash`).
+- Duplication d'exports: messages `exportfs: duplicated export entries` → nettoyer `/etc/exports` et `/etc/exports.d/`, puis `exportfs -ua && exportfs -ra`.
+- Vérifs rapides:
+  - NFS client: `showmount -e <SERVER_IP>`, `mount | grep nfs`.
+  - Samba serveur: `sudo smbstatus -S`.
+- Pare-feu: ouvrir NFS pour l'IP cliente, ou le profil `Samba`.
+
+### 7.8 Bonnes pratiques et différences
+- Samba pour Windows: SMB/CIFS natif, intégration AD possible (groupes/ACL NTFS).
+- NFS pour Linux: respect des UID/GID POSIX, perfs LAN, simplicité.
+- Production: éviter `0777` et `no_root_squash`; préférer contrôles par IP, UID/GID cohérents, groupes dédiés, sauvegardes et journaux.
+
+## 8. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
