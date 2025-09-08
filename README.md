@@ -69,7 +69,19 @@
   - [8.6 Journaux et baux](#86-journaux-et-baux)
   - [8.7 Réservations par adresse MAC](#87-réservations-par-adresse-mac)
   - [8.8 Bonnes pratiques et dépannage](#88-bonnes-pratiques-et-dépannage)
-- [9. Références](#9-références)
+- [9. DNS: principes et mise en place (BIND 9)](#9-dns-principes-et-mise-en-place-bind-9)
+  - [9.1 Concepts DNS](#91-concepts-dns)
+  - [9.2 Installation de BIND 9](#92-installation-de-bind-9)
+  - [9.3 Configuration des zones (forward et reverse)](#93-configuration-des-zones-forward-et-reverse)
+  - [9.4 Options globales et sécurité](#94-options-globales-et-sécurité)
+  - [9.5 Vérification, rechargement et tests](#95-vérification-rechargement-et-tests)
+  - [9.6 Intégration avec DHCP (options Kea)](#96-intégration-avec-dhcp-options-kea)
+  - [9.7 Résolution récursive et forwarders](#97-résolution-récursive-et-forwarders)
+  - [9.8 Bonnes pratiques et dépannage](#98-bonnes-pratiques-et-dépannage)
+  - [9.9 Enregistrements SOA et gestion du Serial](#99-enregistrements-soa-et-gestion-du-serial)
+  - [9.10 DNS et transport (UDP/TCP), transferts de zone](#910-dns-et-transport-udptcp-transferts-de-zone)
+  - [9.11 Diagnostics avancés (dig, journalisation, tests)](#911-diagnostics-avancés-dig-journalisation-tests)
+- [10. Références](#10-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -909,9 +921,164 @@ sudo systemctl restart isc-kea-dhcp4-server
 - Vérifier l'interface dans `interfaces-config` et ouvrir 67/UDP si pare-feu actif.
 - En production: rotation des logs, sauvegardes, cohérence d'adressage, documenter les réservations.
 
-## 9. Références
+## 9. DNS: principes et mise en place (BIND 9)
+
+### 9.1 Concepts DNS
+- Rôle: résolution de noms ↔ adresses IP (annuaire du réseau). Un résolveur interroge un ou plusieurs serveurs pour obtenir la réponse.
+- Types courants: A/AAAA (adresse), CNAME (alias), NS (serveur de noms), PTR (reverse), MX (mail), TXT (infos diverses).
+- Zones: directe (forward) pour noms→IP, inverse (reverse) pour IP→noms. Chaque zone est servie par au moins un serveur faisant autorité.
+- TTL: durée pendant laquelle une réponse peut être gardée en cache (important pour la propagation et la charge).
+
+### 9.2 Installation de BIND 9
+```bash
+sudo apt update && sudo apt install -y bind9 bind9-utils bind9-doc
+
+# IPv4 uniquement
+echo 'OPTIONS="-u bind -4"' | sudo tee /etc/default/named >/dev/null
+
+sudo systemctl enable --now named
+systemctl status named --no-pager -l | cat
+```
+
+### 9.3 Configuration des zones (forward et reverse)
+Fichier `/etc/bind/named.conf.local`:
+```conf
+zone "emf300.local" {
+  type primary;
+  file "/etc/bind/db.emf300.local";
+};
+
+zone "10.10.10.in-addr.arpa" {
+  type primary;
+  file "/etc/bind/db.10.10.10";
+};
+```
+
+Zone directe `/etc/bind/db.emf300.local` (faisant autorité sur `emf300.local`):
+```conf
+$TTL 1h
+@   IN SOA srv-keabind-01.emf300.local. admin.emf300.local. (
+        2025090101 ; Serial
+        1h         ; Refresh
+        15m        ; Retry
+        1w         ; Expire
+        1h )       ; Negative Cache TTL
+
+@                       IN NS   srv-keabind-01.emf300.local.
+@                       IN A    10.10.10.5
+srv-keabind-01.emf300.local. IN A 10.10.10.5
+dhcp                    IN CNAME srv-keabind-01.emf300.local.
+```
+
+Zone inverse `/etc/bind/db.10.10.10` (résolution IP→nom pour 10.10.10.0/24):
+```conf
+$TTL 1h
+@   IN SOA srv-keabind-01.emf300.local. admin.emf300.local. (
+        2025090101 ; Serial
+        1h ; Refresh
+        15m ; Retry
+        1w ; Expire
+        1h ) ; Negative Cache TTL
+@                       IN NS   srv-keabind-01.emf300.local.
+5                       IN PTR  srv-keabind-01.emf300.local.
+```
+
+### 9.4 Options globales et sécurité
+Éditer `/etc/bind/named.conf.options`:
+```conf
+acl "trusted" {
+  10.10.10.0/24;
+  127.0.0.1;
+};
+
+options {
+  directory "/var/cache/bind";
+
+  recursion no;                   // autoritaire par défaut
+  allow-recursion { trusted; };
+  listen-on { 10.10.10.5; 127.0.0.1; };
+  allow-transfer { none; };
+  dnssec-validation auto;
+  listen-on-v6 { none; };
+}
+```
+
+### 9.5 Vérification, rechargement et tests
+```bash
+sudo named-checkconf
+sudo named-checkzone emf300.local /etc/bind/db.emf300.local
+sudo named-checkzone 10.10.10.in-addr.arpa /etc/bind/db.10.10.10
+
+sudo systemctl reload named
+
+# Tests (serveur)
+dig @127.0.0.1 srv-keabind-01.emf300.local A +short
+dig @127.0.0.1 -x 10.10.10.5 +short
+```
+
+### 9.6 Intégration avec DHCP (options Kea)
+Pousser DNS + suffixe via Kea dans `option-data` du `subnet4`:
+```json
+{
+  "name": "domain-name-servers", "data": "10.10.10.5"
+},
+{
+  "name": "domain-name", "data": "emf300.local"
+}
+```
+Côté client, renouveler le bail (`dhclient -r` puis `dhclient -v`).
+
+### 9.7 Résolution récursive et forwarders
+- Récursif: dans `named.conf.options`, passer `recursion yes;` puis recharger.
+- Forwarder: ajouter un redirecteur, ex. Google DNS.
+
+```conf
+options {
+  // ...
+  recursion yes;
+  forwarders { 8.8.8.8; };
+}
+```
+
+Tests côté client:
+```bash
+dig www.cff.ch +short
+```
+
+### 9.8 Bonnes pratiques et dépannage
+- Incrémenter le Serial à chaque modification de zone.
+- Limiter `allow-recursion` aux hôtes de confiance, éviter un résolveur ouvert.
+- Vérifier l’écoute sur 53/UDP (`ss -ulpn | grep :53`).
+- CNAME vs A: un CNAME (ex. `dhcp`) pointe vers un A (ex. `srv-keabind-01`).
+
+### 9.9 Enregistrements SOA et gestion du Serial
+- SOA (Start of Authority) définit l’autorité et les timers d’une zone (refresh/retry/expire/negative TTL).
+- Le champ `Serial` doit être incrémenté à chaque changement de zone. Convention fréquente: `YYYYMMDDNN`.
+- Si le Serial n’augmente pas, BIND recharge localement mais les secondaires (le cas échéant) ne prennent pas la nouvelle version.
+
+### 9.10 DNS et transport (UDP/TCP), transferts de zone
+- Requêtes classiques: UDP/53. Repli en TCP/53 si la réponse est tronquée (flag TC) ou pour certaines opérations.
+- Transferts de zone: `AXFR` (full) et `IXFR` (incrémental) utilisent TCP; par défaut on les bloque (`allow-transfer { none; }`) en environnement simple pour éviter la fuite d’infos.
+- Ouvrir sélectivement les transferts vers des secondaires autorisés si nécessaire.
+
+### 9.11 Diagnostics avancés (dig, journalisation, tests)
+```bash
+# Inspection détaillée
+dig @127.0.0.1 emf300.local SOA +multi +nocomments
+dig @127.0.0.1 srv-keabind-01.emf300.local A +ttlunits
+dig @127.0.0.1 -x 10.10.10.5 PTR +ttlunits
+
+# Traçage récursif (utile pour comprendre la résolution Internet)
+dig +trace www.cff.ch
+
+# Logs BIND (journalctl)
+sudo journalctl -u named -e | cat
+```
+
+## 10. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
+- Exemples de commandes et fichiers de config : https://openai.com
 
 
