@@ -60,7 +60,16 @@
   - [7.6 Client Linux vers Samba (optionnel)](#76-client-linux-vers-samba-optionnel)
   - [7.7 Dépannage et cas courants](#77-dépannage-et-cas-courants)
   - [7.8 Bonnes pratiques et différences](#78-bonnes-pratiques-et-différences)
-- [8. Références](#8-références)
+- [8. DHCP: principes et mise en place (Kea)](#8-dhcp-principes-et-mise-en-place-kea)
+  - [8.1 Rappels sur DHCP (IPv4)](#81-rappels-sur-dhcp-ipv4)
+  - [8.2 Installation du serveur Kea (Ubuntu 24.04)](#82-installation-du-serveur-kea-ubuntu-2404)
+  - [8.3 Configuration minimale DHCPv4](#83-configuration-minimale-dhcpv4)
+  - [8.4 Démarrer et activer le service](#84-démarrer-et-activer-le-service)
+  - [8.5 Tests côté client](#85-tests-côté-client)
+  - [8.6 Journaux et baux](#86-journaux-et-baux)
+  - [8.7 Réservations par adresse MAC](#87-réservations-par-adresse-mac)
+  - [8.8 Bonnes pratiques et dépannage](#88-bonnes-pratiques-et-dépannage)
+- [9. Références](#9-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -795,7 +804,112 @@ echo "//<SERVER_IP>/partage-samba /mnt/smb cifs username=smbuser,vers=3.0,uid=10
 - NFS pour Linux: respect des UID/GID POSIX, perfs LAN, simplicité.
 - Production: éviter `0777` et `no_root_squash`; préférer contrôles par IP, UID/GID cohérents, groupes dédiés, sauvegardes et journaux.
 
-## 8. Références
+## 8. DHCP: principes et mise en place (Kea)
+
+### 8.1 Rappels sur DHCP (IPv4)
+- Objectif: attribution automatique de l'IP, masque, passerelle et DNS.
+- Ports: serveur 67/UDP, client 68/UDP (broadcast initial).
+- Échanges DORA (simplifié):
+
+```text
+Client →       DHCP Discover (qui peut me configurer ?)
+        ← Serveur: DHCP Offer (voici une offre d'IP + options)
+Client →       DHCP Request (je veux cette offre)
+        ← Serveur: DHCP Ack (confirmation + durée du bail)
+```
+
+- Durée de bail: timers `T1` (~50%) et `T2` (~87.5%) pour renouveler avant expiration.
+
+### 8.2 Installation du serveur Kea (Ubuntu 24.04)
+```bash
+# Dépôt officiel ISC (Kea 3.0 LTS)
+curl -1sLf 'https://dl.cloudsmith.io/public/isc/kea-3-0/setup.deb.sh' | sudo -E bash
+
+sudo apt update
+sudo apt install -y isc-kea
+
+# (optionnel) accès aux logs/fichiers
+sudo usermod -aG _kea "$USER"
+```
+
+### 8.3 Configuration minimale DHCPv4
+Fichier: `/etc/kea/kea-dhcp4.conf` (sauvegarder l'original en `.bkp`).
+
+Exemple pour `10.10.10.0/24` (pool, routeur, DNS):
+```json
+{
+  "Dhcp4": {
+    "interfaces-config": { "interfaces": ["ens33"] },
+    "lease-database": { "type": "memfile", "persist": true, "name": "/var/lib/kea/dhcp4.leases" },
+    "valid-lifetime": 28800,
+    "subnet4": [{
+      "id": 1,
+      "subnet": "10.10.10.0/24",
+      "pools": [ { "pool": "10.10.10.10 - 10.10.10.250" } ],
+      "option-data": [
+        { "name": "routers", "data": "10.10.10.2" },
+        { "name": "domain-name-servers", "data": "8.8.8.8" }
+      ]
+    }],
+    "loggers": [{ "name": "kea-dhcp4", "output_options": [{ "output": "/var/log/kea/kea-dhcp4.log" }], "severity": "INFO" }]
+  }
+}
+```
+Notes: adapter l'interface (`ens33`, `ens160`, ...). Le champ `id` du `subnet4` est requis.
+
+Options utiles (exemples dans `option-data`):
+- `routers`: passerelle par défaut.
+- `domain-name-servers`: liste de DNS.
+- `domain-name`: suffixe DNS local (ex.: `lan.local`).
+
+### 8.4 Démarrer et activer le service
+```bash
+sudo systemctl enable --now isc-kea-dhcp4-server
+systemctl status isc-kea-dhcp4-server | cat
+```
+
+### 8.5 Tests côté client
+```bash
+nmcli device status
+sudo nmcli device show <interface>
+
+# Relancer l'obtention d'IP
+sudo nmcli device disconnect <interface>
+sudo nmcli device connect <interface>
+
+sudo apt install -y isc-dhcp-client
+sudo dhclient -r <interface>   # release
+sudo dhclient -v <interface>   # renew (verbeux)
+```
+
+Diagnostics rapides:
+- IP obtenue mais pas d'Internet: vérifier route par défaut (`ip route`) et DNS (ping IP vs nom de domaine).
+- Pas d'IP: vérifier que le serveur écoute sur la bonne interface, que le DHCP concurrent (ex.: VMware) est désactivé, et consulter les logs Kea.
+
+### 8.6 Journaux et baux
+```bash
+sudo tail -f /var/log/kea/kea-dhcp4.log
+sudo tail -f /var/lib/kea/dhcp4.leases
+```
+
+### 8.7 Réservations par adresse MAC
+Dans le bloc `subnet4`, ajouter `reservations`:
+```json
+"reservations": [
+  { "hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.10.10.50" }
+]
+```
+Puis appliquer:
+```bash
+sudo systemctl restart isc-kea-dhcp4-server
+```
+
+### 8.8 Bonnes pratiques et dépannage
+- Désactiver tout autre DHCP sur le même segment (ex.: DHCP VMware).
+- Vérifier l'interface dans `interfaces-config` et ouvrir 67/UDP si pare-feu actif.
+- En production: rotation des logs, sauvegardes, cohérence d'adressage, documenter les réservations.
+
+## 9. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
