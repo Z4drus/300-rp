@@ -81,7 +81,14 @@
   - [9.9 Enregistrements SOA et gestion du Serial](#99-enregistrements-soa-et-gestion-du-serial)
   - [9.10 DNS et transport (UDP/TCP), transferts de zone](#910-dns-et-transport-udptcp-transferts-de-zone)
   - [9.11 Diagnostics avancés (dig, journalisation, tests)](#911-diagnostics-avancés-dig-journalisation-tests)
-- [10. Références](#10-références)
+- [10. Cloud-init et Terraform (déploiement Exoscale)](#10-cloud-init-et-terraform-déploiement-exoscale)
+  - [10.1 Concepts et objectifs](#101-concepts-et-objectifs)
+  - [10.2 Générer une paire de clés SSH (ed25519)](#102-générer-une-paire-de-clés-ssh-ed25519)
+  - [10.3 Terraform: VM Ubuntu + user-data cloud-init](#103-terraform-vm-ubuntu--user-data-cloud-init)
+  - [10.4 Déploiement et tests](#104-déploiement-et-tests)
+  - [10.5 Diagnostic cloud-init](#105-diagnostic-cloud-init)
+  - [10.6 Bonnes pratiques](#106-bonnes-pratiques)
+- [11. Références](#11-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -1075,7 +1082,118 @@ dig +trace www.cff.ch
 sudo journalctl -u named -e | cat
 ```
 
-## 10. Références
+## 10. Cloud-init et Terraform (déploiement Exoscale)
+
+### 10.1 Concepts et objectifs
+- Objectif: provisionner automatiquement une VM Ubuntu sur Exoscale et appliquer une configuration au premier boot via `cloud-init` (installer Nginx, page web, créer `/data`).
+- Outils: Terraform (décrit l’infra), provider Exoscale (API), et `user_data` (cloud-init) injecté dans l’instance.
+
+### 10.2 Générer une paire de clés SSH (ed25519)
+```bash
+ssh-keygen -t ed25519 -C "300-classe-nom-prenom" -f ~/.ssh/300-classe-nom-prenom_ed25519
+```
+- Clé privée: `~/.ssh/300-classe-nom-prenom_ed25519` → ne jamais partager; utilisée côté client pour s’authentifier.
+- Clé publique: `~/.ssh/300-classe-nom-prenom_ed25519.pub` → à enregistrer côté cloud/Terraform pour autoriser l’accès.
+
+### 10.3 Terraform: VM Ubuntu + user-data cloud-init
+Exemple conforme (zone `ch-gva-2`, Ubuntu 24.04, type `standard.small`, disque 20 Go, Nginx + `/data`). Remplacez le nom par `300-classe-ubuntu-nom-prenom`.
+
+```hcl
+terraform {
+  required_providers {
+    exoscale = { source = "exoscale/exoscale" }
+  }
+}
+
+provider "exoscale" {
+  # Recommandé: variables d'env EXOSCALE_API_KEY / EXOSCALE_API_SECRET
+  key    = "<VOTRE_API_KEY>"
+  secret = "<VOTRE_API_SECRET>"
+}
+
+resource "exoscale_ssh_key" "my_ssh_key" {
+  name       = "300-classe-nom-prenom-key"
+  public_key = file(pathexpand("~/.ssh/300-classe-nom-prenom_ed25519.pub"))
+}
+
+resource "exoscale_compute_instance" "my_instance" {
+  zone               = "ch-gva-2"
+  name               = "300-classe-ubuntu-nom-prenom"
+  template_id        = "4395dec0-e9d3-4bda-ad06-4e7fc7457464" # Ubuntu 24.04 LTS
+  type               = "standard.small"
+  disk_size          = 20
+  security_group_ids = ["806f6bde-e106-4053-9d50-4547522cc048"] # SG HTTP/HTTPS/SSH
+  ssh_keys           = [exoscale_ssh_key.my_ssh_key.name]
+
+  user_data = <<-EOF
+  #cloud-config
+  package_update: true
+  package_upgrade: true
+  packages:
+    - nginx
+
+  write_files:
+    - path: /var/www/html/index.html
+      owner: www-data:www-data
+      permissions: "0644"
+      content: |
+        <!doctype html>
+        <html lang="fr">
+        <head><meta charset="utf-8"><title>OK</title></head>
+        <body style="font-family:sans-serif">
+          <h1>Exercice Cloud-Init ✅</h1>
+          <p>Serveur: 300-classe-ubuntu-nom-prenom</p>
+          <p>Nginx installé & lancé, /data créé.</p>
+        </body>
+        </html>
+
+  runcmd:
+    - systemctl enable --now nginx
+    - mkdir -p /data
+
+  final_message: "Cloud-init terminé. Nginx opérationnel. /data créé."
+  EOF
+}
+
+output "public_ip" {
+  value = exoscale_compute_instance.my_instance.public_ip_address
+}
+```
+
+### 10.4 Déploiement et tests
+```bash
+terraform init
+terraform apply -auto-approve
+
+# IP publique
+terraform output -raw public_ip
+
+# SSH (utilisateur ubuntu)
+ssh -i ~/.ssh/300-classe-nom-prenom_ed25519 ubuntu@$(terraform output -raw public_ip)
+
+# HTTP
+curl http://$(terraform output -raw public_ip)
+```
+
+### 10.5 Diagnostic cloud-init
+Sur la VM:
+```bash
+cloud-init status --long
+sudo journalctl -u cloud-init -xe --no-pager
+ls -ld /data
+systemctl status nginx --no-pager
+```
+Notes:
+- cloud-init ne rejoue pas automatiquement; pour réappliquer, recréez l’instance (ou nettoyez `/var/lib/cloud` avec prudence).
+- `user_data` est lu au premier démarrage seulement.
+
+### 10.6 Bonnes pratiques
+- Ne pas commiter les clés API: préférer variables d’environnement ou `terraform.tfvars` ignoré.
+- Garder `user_data` minimal et idempotent (`packages`, `write_files`, `runcmd`).
+- Security Group: autoriser au minimum SSH (22) et HTTP (80).
+- Versionner l’infra séparément des secrets et des clés SSH.
+
+## 11. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
