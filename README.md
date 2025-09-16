@@ -81,14 +81,23 @@
   - [9.9 Enregistrements SOA et gestion du Serial](#99-enregistrements-soa-et-gestion-du-serial)
   - [9.10 DNS et transport (UDP/TCP), transferts de zone](#910-dns-et-transport-udptcp-transferts-de-zone)
   - [9.11 Diagnostics avancés (dig, journalisation, tests)](#911-diagnostics-avancés-dig-journalisation-tests)
-- [10. Cloud-init et Terraform (déploiement Exoscale)](#10-cloud-init-et-terraform-déploiement-exoscale)
-  - [10.1 Concepts et objectifs](#101-concepts-et-objectifs)
-  - [10.2 Générer une paire de clés SSH (ed25519)](#102-générer-une-paire-de-clés-ssh-ed25519)
-  - [10.3 Terraform: VM Ubuntu + user-data cloud-init](#103-terraform-vm-ubuntu--user-data-cloud-init)
-  - [10.4 Déploiement et tests](#104-déploiement-et-tests)
-  - [10.5 Diagnostic cloud-init](#105-diagnostic-cloud-init)
-  - [10.6 Bonnes pratiques](#106-bonnes-pratiques)
-- [11. Références](#11-références)
+- [10. LDAP et Active Directory (concepts, commandes, guide)](#10-ldap-et-active-directory-concepts-commandes-guide)
+  - [10.1 Concepts clés](#101-concepts-clés)
+  - [10.2 Active Directory: objets et structure](#102-active-directory-objets-et-structure)
+  - [10.3 Installer et promouvoir un contrôleur de domaine (Windows Server)](#103-installer-et-promouvoir-un-contrôleur-de-domaine-windows-server)
+  - [10.4 DNS intégré à AD (forwarders, conditional forwarders)](#104-dns-intégré-à-ad-forwarders-conditional-forwarders)
+  - [10.5 LDAP: commandes côté Linux](#105-ldap-commandes-côté-linux)
+  - [10.6 Intégration applicative (ex.: Nextcloud via interface web)](#106-intégration-applicative-ex-nextcloud-via-interface-web)
+  - [10.7 Sécurité et bonnes pratiques](#107-sécurité-et-bonnes-pratiques)
+  - [10.8 Dépannage](#108-dépannage)
+- [11. Cloud-init et Terraform (déploiement Exoscale)](#11-cloud-init-et-terraform-déploiement-exoscale)
+  - [11.1 Concepts et objectifs](#111-concepts-et-objectifs)
+  - [11.2 Générer une paire de clés SSH (ed25519)](#112-générer-une-paire-de-clés-ssh-ed25519)
+  - [11.3 Terraform: VM Ubuntu + user-data cloud-init](#113-terraform-vm-ubuntu--user-data-cloud-init)
+  - [11.4 Déploiement et tests](#114-déploiement-et-tests)
+  - [11.5 Diagnostic cloud-init](#115-diagnostic-cloud-init)
+  - [11.6 Bonnes pratiques](#116-bonnes-pratiques)
+- [12. Références](#12-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -838,6 +847,14 @@ Client →       DHCP Request (je veux cette offre)
 ```
 
 - Durée de bail: timers `T1` (~50%) et `T2` (~87.5%) pour renouveler avant expiration.
+ 
+ Conventions et variables (DHCP):
+ - Interface réseau: adaptez `ens33` à votre interface réelle (`ip a` pour la connaître: ex. `ens160`, `enp0s3`).
+ - Sous-réseau: exemples donnés pour `10.10.10.0/24`; remplacez par votre CIDR (ex.: `192.168.50.0/24`).
+ - Plage d’attribution (pool): borne de début/fin dans le sous-réseau (ex.: `10.10.10.10 - 10.10.10.250`).
+ - Routeur (gateway): IP de la passerelle du LAN (ex.: `10.10.10.2`).
+ - DNS: adresses des résolveurs que recevront les clients (ex.: `10.10.10.5`, `8.8.8.8`).
+ - Durée de bail: `valid-lifetime` en secondes (ex.: `28800` = 8 heures).
 
 ### 8.2 Installation du serveur Kea (Ubuntu 24.04)
 ```bash
@@ -850,6 +867,10 @@ sudo apt install -y isc-kea
 # (optionnel) accès aux logs/fichiers
 sudo usermod -aG _kea "$USER"
 ```
+Explications:
+- Le script Cloudsmith ajoute le dépôt officiel ISC (versions récentes et LTS).
+- `isc-kea` installe Kea et ses services (notamment DHCPv4).
+- L’ajout de l’utilisateur au groupe `_kea` facilite la lecture des journaux et fichiers d’état.
 
 ### 8.3 Configuration minimale DHCPv4
 Fichier: `/etc/kea/kea-dhcp4.conf` (sauvegarder l'original en `.bkp`).
@@ -880,12 +901,43 @@ Options utiles (exemples dans `option-data`):
 - `routers`: passerelle par défaut.
 - `domain-name-servers`: liste de DNS.
 - `domain-name`: suffixe DNS local (ex.: `lan.local`).
+ 
+ Éléments à adapter et exemple:
+ - `interfaces-config.interfaces`: mettez le nom exact de votre interface (ex.: `ens160`).
+ - `subnet4[].subnet`: votre réseau et masque CIDR (ex.: `192.168.50.0/24`).
+ - `pools[].pool`: plage d’adresses distribuées (dans le sous-réseau, hors IP réservées).
+ - `option-data.routers`: IP de la passerelle par défaut pour ce sous-réseau.
+ - `option-data.domain-name-servers`: DNS à remettre au client (une ou plusieurs IP, séparées par des virgules si besoin: "10.10.10.5, 1.1.1.1").
+ - `id`: identifiant unique du bloc `subnet4` (entier > 0), requis par Kea.
+
+ Exemple d’adaptation (réseau domestique 192.168.50.0/24):
+ ```json
+ {
+   "Dhcp4": {
+     "interfaces-config": { "interfaces": ["ens160"] },
+     "lease-database": { "type": "memfile", "persist": true, "name": "/var/lib/kea/dhcp4.leases" },
+     "valid-lifetime": 43200,
+     "subnet4": [{
+       "id": 10,
+       "subnet": "192.168.50.0/24",
+       "pools": [ { "pool": "192.168.50.100 - 192.168.50.200" } ],
+       "option-data": [
+         { "name": "routers", "data": "192.168.50.1" },
+         { "name": "domain-name-servers", "data": "192.168.50.10, 1.1.1.1" }
+       ]
+     }]
+   }
+ }
+ ```
 
 ### 8.4 Démarrer et activer le service
 ```bash
 sudo systemctl enable --now isc-kea-dhcp4-server
 systemctl status isc-kea-dhcp4-server | cat
 ```
+Explications:
+- `enable --now` active le service au démarrage et le démarre immédiatement.
+- `status` permet de vérifier l’état et les éventuelles erreurs de configuration (journal en bas de sortie).
 
 ### 8.5 Tests côté client
 ```bash
@@ -900,6 +952,10 @@ sudo apt install -y isc-dhcp-client
 sudo dhclient -r <interface>   # release
 sudo dhclient -v <interface>   # renew (verbeux)
 ```
+Explications et variables:
+- Remplacez `<interface>` par l’interface du client (ex.: `ens33`).
+- `nmcli` est l’outil de NetworkManager. Si vous n’utilisez pas NetworkManager (ex.: server netplan/systemd-networkd), utilisez plutôt `ip addr`, `ip route`, `resolvectl` et `dhclient` directement.
+- `dhclient -r` libère l’IP; `dhclient -v` renégocie un bail (sortie détaillée utile pour le debug).
 
 Diagnostics rapides:
 - IP obtenue mais pas d'Internet: vérifier route par défaut (`ip route`) et DNS (ping IP vs nom de domaine).
@@ -910,6 +966,9 @@ Diagnostics rapides:
 sudo tail -f /var/log/kea/kea-dhcp4.log
 sudo tail -f /var/lib/kea/dhcp4.leases
 ```
+Explications:
+- `kea-dhcp4.log`: messages de démarrage, attributions, erreurs.
+- `dhcp4.leases`: baux actifs (MAC, IP, heure d’expiration). Utile pour vérifier qu’un client a bien reçu un bail.
 
 ### 8.7 Réservations par adresse MAC
 Dans le bloc `subnet4`, ajouter `reservations`:
@@ -922,11 +981,16 @@ Puis appliquer:
 ```bash
 sudo systemctl restart isc-kea-dhcp4-server
 ```
+À adapter:
+- `hw-address`: adresse MAC du client (format hex, minuscules avec `:`).
+- `ip-address`: IP fixe à réserver, dans la plage du `subnet` mais hors du `pool` si vous voulez éviter les conflits.
 
 ### 8.8 Bonnes pratiques et dépannage
 - Désactiver tout autre DHCP sur le même segment (ex.: DHCP VMware).
 - Vérifier l'interface dans `interfaces-config` et ouvrir 67/UDP si pare-feu actif.
 - En production: rotation des logs, sauvegardes, cohérence d'adressage, documenter les réservations.
+ - Vérifier que Kea écoute: `sudo ss -ulpn | grep :67` (serveur) et que les clients émettent sur 68/UDP.
+ - Si un client ne reçoit pas d’IP, tester en le plaçant dans le même VLAN et sans pare-feu intermédiaire.
 
 ## 9. DNS: principes et mise en place (BIND 9)
 
@@ -935,6 +999,11 @@ sudo systemctl restart isc-kea-dhcp4-server
 - Types courants: A/AAAA (adresse), CNAME (alias), NS (serveur de noms), PTR (reverse), MX (mail), TXT (infos diverses).
 - Zones: directe (forward) pour noms→IP, inverse (reverse) pour IP→noms. Chaque zone est servie par au moins un serveur faisant autorité.
 - TTL: durée pendant laquelle une réponse peut être gardée en cache (important pour la propagation et la charge).
+ 
+ Conventions et variables (DNS):
+ - Domaine: exemples avec `emf300.local` → remplacez par votre nom de domaine.
+ - Serveur DNS (BIND): IP d’exemple `10.10.10.5` → remplacez par l’IP de votre serveur.
+ - Reverse zone: pour un /24 `10.10.10.0/24` → `10.10.10.in-addr.arpa`; adaptez au préfixe de votre réseau.
 
 ### 9.2 Installation de BIND 9
 ```bash
@@ -946,6 +1015,10 @@ echo 'OPTIONS="-u bind -4"' | sudo tee /etc/default/named >/dev/null
 sudo systemctl enable --now named
 systemctl status named --no-pager -l | cat
 ```
+Explications:
+- `bind9` installe le service `named` (serveur DNS), `bind9-utils` fournit `dig`, `named-check*`.
+- L’option `-4` force l’écoute IPv4 uniquement (utile en lab si IPv6 non configuré).
+- `enable --now` active et démarre le service.
 
 ### 9.3 Configuration des zones (forward et reverse)
 Fichier `/etc/bind/named.conf.local`:
@@ -960,6 +1033,10 @@ zone "10.10.10.in-addr.arpa" {
   file "/etc/bind/db.10.10.10";
 };
 ```
+À adapter:
+- `zone "<votre_domaine>"` et `file "/etc/bind/db.<votre_domaine>"` (choisissez un nom de fichier cohérent).
+- Reverse: pour `A.B.C.0/24`, utilisez `C.B.A.in-addr.arpa` et un fichier correspondant (ex.: `db.10.10.10`).
+- Pour un `/16` (ex. `10.10.0.0/16`): reverse `10.10.in-addr.arpa`; pour `/8` → `10.in-addr.arpa` (PTR à granularité différente).
 
 Zone directe `/etc/bind/db.emf300.local` (faisant autorité sur `emf300.local`):
 ```conf
@@ -976,6 +1053,10 @@ $TTL 1h
 srv-keabind-01.emf300.local. IN A 10.10.10.5
 dhcp                    IN CNAME srv-keabind-01.emf300.local.
 ```
+À adapter:
+- Remplacez `srv-keabind-01.emf300.local.` par le FQDN de votre serveur DNS.
+- L’enregistrement `@ IN A` définit l’IP par défaut du domaine (optionnel selon design).
+- Ajoutez vos hôtes A supplémentaires selon besoin (ex.: `www`, `mail`).
 
 Zone inverse `/etc/bind/db.10.10.10` (résolution IP→nom pour 10.10.10.0/24):
 ```conf
@@ -989,6 +1070,9 @@ $TTL 1h
 @                       IN NS   srv-keabind-01.emf300.local.
 5                       IN PTR  srv-keabind-01.emf300.local.
 ```
+Explications:
+- `5 IN PTR ...` correspond à l’IP `10.10.10.5` (le dernier octet devient le label PTR).
+- Ajoutez un enregistrement PTR par hôte que vous souhaitez résoudre en reverse (ex.: `50 IN PTR host50.emf300.local.` → `10.10.10.50`).
 
 ### 9.4 Options globales et sécurité
 Éditer `/etc/bind/named.conf.options`:
@@ -1009,6 +1093,11 @@ options {
   listen-on-v6 { none; };
 }
 ```
+Explications et adaptations:
+- `acl "trusted"`: mettez votre sous-réseau de confiance.
+- `recursion no`: désactive la résolution récursive (serveur autoritaire pur). Passez à `yes` si vous voulez aussi un résolveur local (voir 9.7).
+- `listen-on`: interfaces/ips d’écoute (ajoutez/enlevez selon votre hôte).
+- `allow-transfer { none; }`: bloque les transferts de zone (évite la fuite d’infos). Ouvrez seulement vers des secondaires autorisés.
 
 ### 9.5 Vérification, rechargement et tests
 ```bash
@@ -1022,6 +1111,11 @@ sudo systemctl reload named
 dig @127.0.0.1 srv-keabind-01.emf300.local A +short
 dig @127.0.0.1 -x 10.10.10.5 +short
 ```
+Explications:
+- `named-checkconf`: valide la syntaxe globale; ne renvoie rien si OK.
+- `named-checkzone`: valide la zone et affiche le nombre d’enregistrements chargés.
+- `reload`: recharge la configuration sans redémarrage complet.
+- `dig ... +short`: affiche uniquement la réponse (pratique pour scripts/tests rapides).
 
 ### 9.6 Intégration avec DHCP (options Kea)
 Pousser DNS + suffixe via Kea dans `option-data` du `subnet4`:
@@ -1034,6 +1128,9 @@ Pousser DNS + suffixe via Kea dans `option-data` du `subnet4`:
 }
 ```
 Côté client, renouveler le bail (`dhclient -r` puis `dhclient -v`).
+Remarques:
+- Vous pouvez spécifier plusieurs DNS dans `domain-name-servers` (séparés par virgule).
+- `domain-name` fixe le suffixe de recherche DNS (utile pour résoudre `host` au lieu de `host.emf300.local`).
 
 ### 9.7 Résolution récursive et forwarders
 - Récursif: dans `named.conf.options`, passer `recursion yes;` puis recharger.
@@ -1051,6 +1148,9 @@ Tests côté client:
 ```bash
 dig www.cff.ch +short
 ```
+Explications:
+- Activez la récursion uniquement pour des clients de confiance (voir ACL `trusted`).
+- Les `forwarders` sont les DNS en amont utilisés par votre résolveur local.
 
 ### 9.8 Bonnes pratiques et dépannage
 - Incrémenter le Serial à chaque modification de zone.
@@ -1081,21 +1181,133 @@ dig +trace www.cff.ch
 # Logs BIND (journalctl)
 sudo journalctl -u named -e | cat
 ```
+Explications:
+- `+multi`/`+ttlunits`: formatage lisible et unités de TTL.
+- `+trace`: suit la chaîne de résolution depuis la racine (utile pour Internet).
+- `journalctl -u named -e`: affiche la fin des logs du service `named`.
 
-## 10. Cloud-init et Terraform (déploiement Exoscale)
+## 10. LDAP et Active Directory (concepts, commandes, guide)
 
-### 10.1 Concepts et objectifs
+### 10.1 Concepts clés
+- LDAP (Lightweight Directory Access Protocol): protocole standard pour lire/écrire des entrées dans un annuaire. Ports: 389/TCP (LDAP), 636/TCP (LDAPS). Objets identifiés par un DN (Distinguished Name), composés d'attributs et d'`objectClass`.
+- AD (Active Directory): implémente LDAP, Kerberos (authentification), DNS (catalogue), GPO (stratégies). Éléments: Domaine, Arborescence (Tree), Forêt, Sites, Contrôleurs de domaine (DC), Global Catalog (ports 3268/3269).
+- Concepts LDAP utiles: Base DN (racine de recherche), filtres `(&(a=b)(c=d))`, attributs (ex.: `cn`, `sAMAccountName`, `memberOf`), étendue (base/one/sub), liaison (bind) anonyme ou authentifiée.
+
+### 10.2 Active Directory: objets et structure
+- Objets principaux: Utilisateurs (`user`), Groupes (`group`), Ordinateurs (`computer`), Unités d'organisation (OU).
+- Groupes AD:
+  - Catégories: Sécurité vs Distribution; Portées: Local au domaine, Global, Universel.
+  - Attributs: `cn`, `samAccountName`, `member`, `memberOf`, `objectSid`, `primaryGroupID`.
+- Bonnes pratiques de structure:
+  - Créer des OU dédiées: `OU=Groups`, `OU=Users`, `OU=Workstations`, `OU=Servers`.
+  - Nommage groupes métier: `G_<Equipe>` (ex.: `G_IT`, `G_Finance`), groupes de rôle/accès: `R_<Appli>_<Droit>`.
+  - Comptes de service dédiés pour les liaisons LDAP (lecture seule).
+
+### 10.3 Installer et promouvoir un contrôleur de domaine (Windows Server)
+Prérequis: Windows Server (édition Server, non Windows 10/11), IP statique, nom d'hôte défini, PowerShell 5.1 (Desktop).
+
+```powershell
+# Installation du rôle AD DS + outils (Windows PowerShell 5.1 en Administrateur)
+Import-Module ServerManager
+Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+
+# Promotion en nouveau domaine/forêt (ex.: exemple.local)
+Import-Module ADDSDeployment
+$dsrm = Read-Host "DSRM password" -AsSecureString
+Install-ADDSForest -DomainName "exemple.local" -InstallDNS -SafeModeAdministratorPassword $dsrm -Force
+```
+
+Vérifications et DNS forwarders:
+```powershell
+Get-Service NTDS, DNS | Select Name, Status
+Add-DnsServerForwarder -IPAddress 8.8.8.8
+# Forwarder conditionnel vers une zone interne
+Add-DnsServerConditionalForwarderZone -Name "emf300.lan" -MasterServers 10.10.10.5 -ReplicationScope Forest
+```
+
+Création d'OU, groupes, utilisateurs (exemples):
+```powershell
+Import-Module ActiveDirectory
+New-ADOrganizationalUnit -Name "Groups" -Path "DC=exemple,DC=local"
+New-ADOrganizationalUnit -Name "Users"  -Path "DC=exemple,DC=local"
+
+New-ADGroup -Name "G_IT"       -GroupScope Global -GroupCategory Security -Path "OU=Groups,DC=exemple,DC=local"
+New-ADGroup -Name "G_Finance"  -GroupScope Global -GroupCategory Security -Path "OU=Groups,DC=exemple,DC=local"
+
+$pwd = ConvertTo-SecureString "Test123" -AsPlainText -Force
+New-ADUser -Name "Brad Pitt" -SamAccountName pittb -UserPrincipalName "pittb@exemple.local" -AccountPassword $pwd -Enabled $true -PasswordNeverExpires $true -Path "OU=Users,DC=exemple,DC=local"
+Add-ADGroupMember G_IT pittb
+```
+
+### 10.4 DNS intégré à AD (forwarders, conditional forwarders)
+- AD installe DNS pour la zone du domaine. Pour résoudre Internet, ajouter un forwarder (ex.: 8.8.8.8).
+- Pour déléguer la résolution d'une zone interne tierce, créer un forwarder conditionnel pointant vers l'autorité de cette zone.
+
+### 10.5 LDAP: commandes côté Linux
+Installer les outils:
+```bash
+sudo apt install -y ldap-utils
+```
+
+Requêtes fréquentes (AD à l'adresse 10.10.10.6, domaine `exemple.local`):
+```bash
+# Lister les groupes d'une OU
+ldapsearch -x -H ldap://10.10.10.6 \
+  -D "ldapreader@exemple.local" -w 'MotDePasse' \
+  -b "OU=Groups,DC=exemple,DC=local" \
+  "(objectClass=group)" cn distinguishedName
+
+# Détails d'un utilisateur
+ldapsearch -x -H ldap://10.10.10.6 \
+  -D "ldapreader@exemple.local" -w 'MotDePasse' \
+  -b "OU=Users,DC=exemple,DC=local" \
+  "(sAMAccountName=pittb)" cn sAMAccountName memberOf userAccountControl
+
+# Vérifier une authentification utilisateur
+ldapwhoami -x -H ldap://10.10.10.6 -D "pittb@exemple.local" -w 'MotDePasse'
+```
+
+Filtres utiles:
+- Compte actif: `(!(userAccountControl:1.2.840.113556.1.4.803:=2))`
+- Membre d'un groupe: `(memberOf=CN=G_IT,OU=Groups,DC=exemple,DC=local)`
+
+### 10.6 Intégration applicative (ex.: Nextcloud via interface web)
+Étapes génériques côté application (interface d'administration):
+1) Activer le module LDAP/AD.
+2) Renseigner hôte/port, Base DN, DN de liaison (compte de service en lecture), attribut de login (`sAMAccountName`).
+3) Définir filtres utilisateurs (comptes actifs) et groupes (ex.: `cn=G_*`).
+4) Tester la configuration, puis synchroniser/provisionner via l'UI.
+5) Mapper groupes→rôles/dossiers dans l'application.
+
+Remarque: privilégier la configuration via l'interface web de l'application pour éviter les divergences et bénéficier des validations intégrées.
+
+### 10.7 Sécurité et bonnes pratiques
+- Utiliser LDAPS (636/TCP) avec certificats valides; sinon, restreindre réseau et pare-feu.
+- Compte de service LDAP en lecture seule, mot de passe fort, rotation.
+- Ouvrir uniquement les ports nécessaires (389/636/3268/3269 selon besoins).
+- Principe du moindre privilège; désactiver/supprimer les comptes inactifs; journaliser les accès.
+- Cohérence des groupes: privilégier l'appartenance aux groupes AD pour l'autorisation applicative.
+
+### 10.8 Dépannage
+- "Commande AD introuvable" sous PowerShell: utiliser Windows PowerShell 5.1 (Desktop) sur Windows Server, pas PowerShell 7 (Core).
+- Login applicatif échoue: vérifier le filtre de login (doit retourner 1 entrée), tester avec `ldapsearch` et `ldapwhoami`.
+- Pas de résolution de noms: vérifier les forwarders DNS et le pare-feu.
+- Erreurs d'horloge/Kerberos: synchroniser l'heure (NTP), tolérance de dérive (~5 min par défaut).
+
+## 11. Cloud-init et Terraform (déploiement Exoscale)
+
+### 11.1 Concepts et objectifs
 - Objectif: provisionner automatiquement une VM Ubuntu sur Exoscale et appliquer une configuration au premier boot via `cloud-init` (installer Nginx, page web, créer `/data`).
 - Outils: Terraform (décrit l’infra), provider Exoscale (API), et `user_data` (cloud-init) injecté dans l’instance.
 
-### 10.2 Générer une paire de clés SSH (ed25519)
+### 11.2 Générer une paire de clés SSH (ed25519)
 ```bash
 ssh-keygen -t ed25519 -C "300-classe-nom-prenom" -f ~/.ssh/300-classe-nom-prenom_ed25519
 ```
 - Clé privée: `~/.ssh/300-classe-nom-prenom_ed25519` → ne jamais partager; utilisée côté client pour s’authentifier.
 - Clé publique: `~/.ssh/300-classe-nom-prenom_ed25519.pub` → à enregistrer côté cloud/Terraform pour autoriser l’accès.
 
-### 10.3 Terraform: VM Ubuntu + user-data cloud-init
+### 11.3 Terraform: VM Ubuntu + user-data cloud-init
 Exemple conforme (zone `ch-gva-2`, Ubuntu 24.04, type `standard.small`, disque 20 Go, Nginx + `/data`). Remplacez le nom par `300-classe-ubuntu-nom-prenom`.
 
 ```hcl
@@ -1160,7 +1372,7 @@ output "public_ip" {
 }
 ```
 
-### 10.4 Déploiement et tests
+### 11.4 Déploiement et tests
 ```bash
 terraform init
 terraform apply -auto-approve
@@ -1175,7 +1387,7 @@ ssh -i ~/.ssh/300-classe-nom-prenom_ed25519 ubuntu@$(terraform output -raw publi
 curl http://$(terraform output -raw public_ip)
 ```
 
-### 10.5 Diagnostic cloud-init
+### 11.5 Diagnostic cloud-init
 Sur la VM:
 ```bash
 cloud-init status --long
@@ -1187,13 +1399,13 @@ Notes:
 - cloud-init ne rejoue pas automatiquement; pour réappliquer, recréez l’instance (ou nettoyez `/var/lib/cloud` avec prudence).
 - `user_data` est lu au premier démarrage seulement.
 
-### 10.6 Bonnes pratiques
+### 11.6 Bonnes pratiques
 - Ne pas commiter les clés API: préférer variables d’environnement ou `terraform.tfvars` ignoré.
 - Garder `user_data` minimal et idempotent (`packages`, `write_files`, `runcmd`).
 - Security Group: autoriser au minimum SSH (22) et HTTP (80).
 - Versionner l’infra séparément des secrets et des clés SSH.
 
-## 11. Références
+## 12. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
