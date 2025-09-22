@@ -97,7 +97,8 @@
   - [11.4 Déploiement et tests](#114-déploiement-et-tests)
   - [11.5 Diagnostic cloud-init](#115-diagnostic-cloud-init)
   - [11.6 Bonnes pratiques](#116-bonnes-pratiques)
-- [12. Références](#12-références)
+- [12. Logs système (journalctl, dmesg, /var/log)](#12-logs-système-journalctl-dmesg-varlog)
+- [13. Références](#13-références)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -1405,7 +1406,76 @@ Notes:
 - Security Group: autoriser au minimum SSH (22) et HTTP (80).
 - Versionner l’infra séparément des secrets et des clés SSH.
 
-## 12. Références
+## 12. Logs système (journalctl, dmesg, /var/log)
+
+### 12.1 journalctl (journald/systemd)
+Objectif: lire les journaux agrégés par systemd-journald (services, kernel, boot...).
+
+Commandes utiles:
+```bash
+# Historique complet (sans pagination)
+journalctl --no-pager
+
+# Dernières lignes (ex.: 20)
+journalctl -n 20
+
+# Suivi en direct (stream)
+journalctl -f
+
+# Uniquement depuis le dernier démarrage
+journalctl -b
+
+# Filtrer par unité systemd (ex.: ssh)
+journalctl -u ssh --since "-1h"
+
+# Filtrer par priorité (3=err, 4=warning)
+journalctl -p 3 -b
+```
+Explications:
+- `-b` limite aux logs depuis le dernier reboot (pratique pour l’analyse d’un boot).
+- `-u <unit>` cible un service précis (ex.: `sshd`, `nginx`, `named`).
+- `-p <prio>` filtre par sévérité (0=emerg … 7=debug). Combinez avec `-b`/`--since`.
+
+Questions courantes:
+- Types d’événements: démarrage/arrêt services, messages kernel, erreurs, authentification, réseau.
+- Service démarrant tôt: inspecter `journalctl -b | head -n 50` ou `systemd-analyze critical-chain`.
+
+### 12.2 dmesg (messages du noyau)
+Objectif: afficher le ring buffer du kernel (détection matériel, pilotes, périphériques, erreurs bas niveau).
+
+Commandes utiles:
+```bash
+# Affichage avec horodatage lisible
+dmesg -T | less
+
+# Filtrer matériel/périphériques
+dmesg -T | grep -iE 'usb|sd[a-z]|nvme|sata|pci|eth|enp|wlan|bluetooth'
+```
+À noter:
+- Cherchez les lignes `usb X-Y:`, `nvme0n1`, `sda`, `enp0s3`… pour citer un périphérique détecté.
+- Après un ajout de matériel/VM tools, `dmesg` montre souvent les nouveaux pilotes chargés.
+
+### 12.3 /var/log (fichiers texte)
+Objectif: consulter les journaux classiques (rsyslog/syslog-ng) et leurs rotations.
+
+Commandes utiles:
+```bash
+cd /var/log && pwd
+
+# Lecture simple
+less syslog
+# Recherche interactive dans less: /error  (n=suivant, N=précédent, q=quitter)
+
+# Recherche d'erreurs (insensible à la casse) avec contexte
+grep -inC2 'error' syslog | less -S
+
+# Logs archivés compressés
+zgrep -in 'error' syslog.*.gz | less -S
+```
+Astuce identification du service:
+- Dans une ligne `syslog`, le service est souvent avant le `:` ou entre crochets, ex. `NetworkManager[1234]: <error> ...`.
+
+## 13. Références
 - Documentation Ubuntu: https://help.ubuntu.com
 - Debian Handbook: https://debian-handbook.info
 - Arch Wiki (référence générale): https://wiki.archlinux.org
