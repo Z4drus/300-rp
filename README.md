@@ -99,6 +99,7 @@
   - [11.6 Bonnes pratiques](#116-bonnes-pratiques)
 - [12. Logs système (journalctl, dmesg, /var/log)](#12-logs-système-journalctl-dmesg-varlog)
 - [13. Références](#13-références)
+- [14. Conclusion](#Conclusion)
 
 ## 1. Présentation générale
 Brève introduction au contenu du rapport et aux objectifs du module 300.
@@ -1481,4 +1482,7 @@ Astuce identification du service:
 - Arch Wiki (référence générale): https://wiki.archlinux.org
 - Exemples de commandes et fichiers de config : https://openai.com
 
+# Conclusion
 
+J'ai apprécié ce module car il m'a permis de redécouvrir des connaissances que j'avais en partie oublié, même si c'était un peu répétitif par rapport à ce que j'ai déjà appris il y a quelques temps.
+Je pense avoir relativement bien compris le sens de pourquoi Linux est important pour ma carrière d'informaticien ou de développeur et j'apprécie avoir pu en savoir plus dessus.
